@@ -27,6 +27,7 @@ import (
 	"k8s.io/api/extensions/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/cache"
+	"errors"
 )
 
 var _ = Describe("Controller", func() {
@@ -70,7 +71,7 @@ var _ = Describe("Controller", func() {
 		})
 		siiDeployments.On("Run", mock.Anything)
 
-		ctrl = controller.New(topicInformer, functionInformer, deploymentInformer, deployer, tracker, -1)
+		ctrl = controller.New(topicInformer, functionInformer, deploymentInformer, deployer, tracker, -1, time.Duration(time.Nanosecond))
 		closeCh = make(chan struct{}, 2) // 2 allows to easily send in a .Runt() func() on stubs w/o blocking
 	})
 
@@ -103,6 +104,71 @@ var _ = Describe("Controller", func() {
 		functionHandlers.AddFunc(fn)
 
 		ctrl.Run(closeCh)
+	})
+
+	Context("when a function deployment is being deleted", func() {
+
+		var (
+			fn          *v1.Function
+			deployCalls int
+		)
+
+		BeforeEach(func() {
+			ctrl.SetScalingInterval(10 * time.Millisecond)
+
+			tracker.On("BeginTracking", controller.Subscription{Topic: "input", Group: "fn"}).Return(nil)
+			fn = &v1.Function{ObjectMeta: metav1.ObjectMeta{Name: "fn"}, Spec: v1.FunctionSpec{Input: "input"}}
+			deployCalls = 0
+			deployer.On("Deploy", fn).Return(func(function *v1.Function) error {
+				deployCalls++
+				if deployCalls == 1 {
+					return errors.New("...object is being deleted...")
+				}
+				closeCh <- struct{}{}
+				return nil
+			})
+		})
+
+		It("should handle the function being re-created", func() {
+			functionHandlers.AddFunc(fn)
+
+			ctrl.Run(closeCh)
+			Expect(deployCalls).To(Equal(2))
+		})
+	})
+
+	Context("when deploy fails other than when the function is being deleted", func() {
+
+		var (
+			fn          *v1.Function
+			deployCalls int
+		)
+
+		BeforeEach(func() {
+			ctrl.SetScalingInterval(10 * time.Millisecond)
+
+			tracker.On("BeginTracking", controller.Subscription{Topic: "input", Group: "fn"}).Return(nil)
+			fn = &v1.Function{ObjectMeta: metav1.ObjectMeta{Name: "fn"}, Spec: v1.FunctionSpec{Input: "input"}}
+			deployCalls = 0
+			deployer.On("Deploy", fn).Return(func(function *v1.Function) error {
+				deployCalls++
+				if deployCalls == 1 {
+					return errors.New("another error")
+				}
+				return nil
+			})
+			tracker.On("Compute").Return(lag(fn, 1))
+			deployer.On("Scale", fn, 1).Return(nil).Run(func(arg mock.Arguments){
+				closeCh <- struct{}{}
+			})
+		})
+
+		It("should handle the function being re-created", func() {
+			functionHandlers.AddFunc(fn)
+
+			ctrl.Run(closeCh)
+			Expect(deployCalls).To(Equal(1))
+		})
 	})
 
 	It("should handle a non-trivial input topic", func() {
