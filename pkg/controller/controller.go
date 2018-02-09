@@ -29,6 +29,7 @@ import (
 	"k8s.io/api/extensions/v1beta1"
 	informersV1Beta1 "k8s.io/client-go/informers/extensions/v1beta1"
 	"k8s.io/client-go/tools/cache"
+	"strings"
 )
 
 // DefaultScalerInterval controls how often to run the scaling strategy.
@@ -77,8 +78,9 @@ type ctrl struct {
 	topics         map[topicKey]*v1.Topic
 	actualReplicas map[fnKey]int
 
-	deployer   Deployer
-	lagTracker LagTracker
+	deployer         Deployer
+	lagTracker       LagTracker
+	deployRetryDelay time.Duration
 
 	scalerInterval time.Duration
 	scalingPolicy  scalingPolicy
@@ -159,7 +161,18 @@ func (c *ctrl) onFunctionAddedOrUpdated(function *v1.Function) {
 	c.lagTracker.BeginTracking(Subscription{Topic: function.Spec.Input, Group: function.Name})
 	err := c.deployer.Deploy(function)
 	if err != nil {
-		log.Printf("Error %v", err)
+		for i := 0; i < 30; i++ {
+			if err != nil && strings.Contains(err.Error(), "object is being deleted") {
+				log.Printf("Deploy failed: %v. Will retry in %.1f seconds", err, c.deployRetryDelay.Seconds())
+				time.Sleep(c.deployRetryDelay)
+				err = c.deployer.Deploy(function)
+			} else {
+				break
+			}
+		}
+		if err != nil {
+			log.Printf("Error %v", err)
+		}
 	}
 }
 
@@ -237,7 +250,8 @@ func New(topicInformer informersV1.TopicInformer,
 	deploymentInformer informersV1Beta1.DeploymentInformer,
 	deployer Deployer,
 	tracker LagTracker,
-	port int) Controller {
+	port int,
+	deplyRetryDelay time.Duration) Controller {
 
 	pctrl := &ctrl{
 		topicsAddedOrUpdated:      make(chan *v1.Topic, 100),
@@ -255,6 +269,7 @@ func New(topicInformer informersV1.TopicInformer,
 		deployer:                  deployer,
 		lagTracker:                tracker,
 		scalerInterval:            DefaultScalerInterval,
+		deployRetryDelay:          deplyRetryDelay,
 	}
 	pctrl.scalingPolicy = pctrl.computeDesiredReplicas
 

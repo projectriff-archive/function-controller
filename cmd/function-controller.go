@@ -36,6 +36,7 @@ import (
 	"k8s.io/client-go/informers/extensions/v1beta1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+	"time"
 )
 
 func main() {
@@ -54,7 +55,7 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	ctrl := controller.New(topicsInformer, functionsInformer, deploymentInformer, deployer, controller.NewLagTracker(brokers), 8080)
+	ctrl := controller.New(topicsInformer, functionsInformer, deploymentInformer, deployer, controller.NewLagTracker(brokers), 8080, time.Duration(10*time.Second))
 
 	controller.DecorateWithDelayAndSmoothing(ctrl)
 
