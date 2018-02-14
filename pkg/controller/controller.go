@@ -64,7 +64,8 @@ type scalingPostProcessor func(replicaCounts, activityCounts) (replicaCounts, ac
 type ctrl struct {
 	topicsAddedOrUpdated      chan *v1.Topic
 	topicsDeleted             chan *v1.Topic
-	functionsAddedOrUpdated   chan *v1.Function
+	functionsAdded            chan *v1.Function
+	functionsUpdated          chan deltaFn
 	functionsDeleted          chan *v1.Function
 	deploymentsAddedOrUpdated chan *v1beta1.Deployment // TODO investigate deprecation -> apps?
 	deploymentsDeleted        chan *v1beta1.Deployment // TODO investigate deprecation -> apps?
@@ -95,6 +96,12 @@ type topicKey struct {
 	name string
 }
 
+// A deltaFn represents a pair of functions involved in an update
+type deltaFn struct {
+	before *v1.Function
+	after  *v1.Function
+}
+
 // Run starts the main controller loop, which streamlines concurrent notifications of topics, functions and deployments
 // coming and going, and periodically runs the function scaling logic.
 func (c *ctrl) Run(stopCh <-chan struct{}) {
@@ -111,8 +118,10 @@ func (c *ctrl) Run(stopCh <-chan struct{}) {
 			c.onTopicAddedOrUpdated(topic)
 		case topic := <-c.topicsDeleted:
 			c.onTopicDeleted(topic)
-		case function := <-c.functionsAddedOrUpdated:
-			c.onFunctionAddedOrUpdated(function)
+		case function := <-c.functionsAdded:
+			c.onFunctionAdded(function)
+		case deltaFn := <-c.functionsUpdated:
+			c.onFunctionUpdated(deltaFn.before, deltaFn.after)
 		case function := <-c.functionsDeleted:
 			c.onFunctionDeleted(function)
 		case deployment := <-c.deploymentsAddedOrUpdated:
@@ -153,11 +162,32 @@ func (c *ctrl) onTopicDeleted(topic *v1.Topic) {
 	delete(c.topics, tkey(topic))
 }
 
-func (c *ctrl) onFunctionAddedOrUpdated(function *v1.Function) {
+func (c *ctrl) onFunctionAdded(function *v1.Function) {
 	log.Printf("Function added: %v", function.Name)
 	c.functions[key(function)] = function
 	c.lagTracker.BeginTracking(Subscription{Topic: function.Spec.Input, Group: function.Name})
 	err := c.deployer.Deploy(function)
+	if err != nil {
+		log.Printf("Error %v", err)
+	}
+}
+
+func (c *ctrl) onFunctionUpdated(oldFn *v1.Function, newFn *v1.Function) {
+	if oldFn.Name != newFn.Name {
+		log.Printf("Error: function name cannot change on update: %s -> %s", oldFn.Name, newFn.Name)
+		return
+	}
+	if oldFn.Namespace != newFn.Namespace {
+		log.Printf("Error: function namespace cannot change on update: %s -> %s", oldFn.Namespace, newFn.Namespace)
+		return
+	}
+	log.Printf("Function updated: %v", oldFn.Name)
+
+	if newFn.Spec.Input != oldFn.Spec.Input {
+		c.lagTracker.StopTracking(Subscription{Topic: oldFn.Spec.Input, Group: oldFn.Name})
+		c.lagTracker.BeginTracking(Subscription{Topic: newFn.Spec.Input, Group: newFn.Name})
+	}
+	err := c.deployer.Update(newFn)
 	if err != nil {
 		log.Printf("Error %v", err)
 	}
@@ -243,7 +273,8 @@ func New(topicInformer informersV1.TopicInformer,
 		topicsAddedOrUpdated:      make(chan *v1.Topic, 100),
 		topicsDeleted:             make(chan *v1.Topic, 100),
 		topicInformer:             topicInformer,
-		functionsAddedOrUpdated:   make(chan *v1.Function, 100),
+		functionsAdded:            make(chan *v1.Function, 100),
+		functionsUpdated:          make(chan deltaFn, 100),
 		functionsDeleted:          make(chan *v1.Function, 100),
 		functionInformer:          functionInformer,
 		deploymentsAddedOrUpdated: make(chan *v1beta1.Deployment, 100),
@@ -279,12 +310,16 @@ func New(topicInformer informersV1.TopicInformer,
 		AddFunc: func(obj interface{}) {
 			fn := obj.(*v1.Function)
 			v1.SetObjectDefaults_Function(fn)
-			pctrl.functionsAddedOrUpdated <- fn
+			pctrl.functionsAdded <- fn
 		},
 		UpdateFunc: func(old interface{}, new interface{}) {
-			fn := new.(*v1.Function)
-			v1.SetObjectDefaults_Function(fn)
-			pctrl.functionsAddedOrUpdated <- fn
+			oldFn := old.(*v1.Function)
+			v1.SetObjectDefaults_Function(oldFn)
+
+			newFn := new.(*v1.Function)
+			v1.SetObjectDefaults_Function(newFn)
+
+			pctrl.functionsUpdated <- deltaFn{before: oldFn, after: newFn}
 		},
 		DeleteFunc: func(obj interface{}) {
 			fn := obj.(*v1.Function)
