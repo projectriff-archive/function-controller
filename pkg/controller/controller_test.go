@@ -110,7 +110,7 @@ var _ = Describe("Controller", func() {
 		fn2 := &v1.Function{ObjectMeta: metav1.ObjectMeta{Name: "fn"}, Spec: v1.FunctionSpec{Input: "input2"}}
 
 		tracker.On("StopTracking", controller.Subscription{Topic: "input", Group: "fn"}).Return(nil)
-		deployer.On("Update", fn2).Return(nil).Run(func(args mock.Arguments) {
+		deployer.On("Update", fn2, 0).Return(nil).Run(func(args mock.Arguments) {
 			closeCh <- struct{}{}
 		})
 		tracker.On("BeginTracking", controller.Subscription{Topic: "input2", Group: "fn"}).Return(nil)

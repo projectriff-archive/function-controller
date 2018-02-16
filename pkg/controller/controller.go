@@ -45,7 +45,7 @@ type Controller interface {
 }
 
 // type replicaCounts is a mapping from function to wanted number of replicas
-type replicaCounts map[fnKey]int
+type replicaCounts map[fnKey]int32
 
 // type activityCounts is a mapping from function to combined activity marker (we're using sum of position accross all
 // partitions and all topics
@@ -76,7 +76,7 @@ type ctrl struct {
 
 	functions      map[fnKey]*v1.Function
 	topics         map[topicKey]*v1.Topic
-	actualReplicas map[fnKey]int
+	actualReplicas map[fnKey]int32
 
 	deployer   Deployer
 	lagTracker LagTracker
@@ -183,11 +183,15 @@ func (c *ctrl) onFunctionUpdated(oldFn *v1.Function, newFn *v1.Function) {
 	}
 	log.Printf("Function updated: %v", oldFn.Name)
 
+	fnKey := key(oldFn)
+	c.functions[fnKey] = newFn
+
 	if newFn.Spec.Input != oldFn.Spec.Input {
 		c.lagTracker.StopTracking(Subscription{Topic: oldFn.Spec.Input, Group: oldFn.Name})
 		c.lagTracker.BeginTracking(Subscription{Topic: newFn.Spec.Input, Group: newFn.Name})
 	}
-	err := c.deployer.Update(newFn)
+
+	err := c.deployer.Update(newFn, int(c.actualReplicas[fnKey]))
 	if err != nil {
 		log.Printf("Error %v", err)
 	}
@@ -206,7 +210,7 @@ func (c *ctrl) onFunctionDeleted(function *v1.Function) {
 func (c *ctrl) onDeploymentAddedOrUpdated(deployment *v1beta1.Deployment) {
 	if key := functionKey(deployment); key != nil {
 		log.Printf("Deployment added/updated: %v", deployment.Name)
-		c.actualReplicas[*key] = int(deployment.Status.Replicas)
+		c.actualReplicas[*key] = deployment.Status.Replicas
 	}
 }
 
@@ -245,7 +249,7 @@ func (c *ctrl) scale() {
 		//log.Printf("For %v, want %v currently have %v", fn.Name, desired, c.actualReplicas[k])
 
 		if desired != c.actualReplicas[k] {
-			err := c.deployer.Scale(fn, desired)
+			err := c.deployer.Scale(fn, int(desired))
 			c.actualReplicas[k] = desired // This may also be updated by deployments informer later.
 			if err != nil {
 				log.Printf("Error %v", err)
@@ -282,7 +286,7 @@ func New(topicInformer informersV1.TopicInformer,
 		deploymentInformer:        deploymentInformer,
 		functions:                 make(map[fnKey]*v1.Function),
 		topics:                    make(map[topicKey]*v1.Topic),
-		actualReplicas:            make(map[fnKey]int),
+		actualReplicas:            make(map[fnKey]int32),
 		deployer:                  deployer,
 		lagTracker:                tracker,
 		scalerInterval:            DefaultScalerInterval,
@@ -398,7 +402,7 @@ func sumCurrentPositions(offsets PartitionedOffsets) int64 {
 	return result
 }
 
-func (c *ctrl) desiredReplicasForTopic(offsets PartitionedOffsets, fnKey fnKey, tKey topicKey) int {
+func (c *ctrl) desiredReplicasForTopic(offsets PartitionedOffsets, fnKey fnKey, tKey topicKey) int32 {
 	maxPartLag := int64(0)
 	for _, o := range offsets {
 		maxPartLag = max64(maxPartLag, o.Lag())
@@ -431,7 +435,7 @@ func (c *ctrl) desiredReplicasForTopic(offsets PartitionedOffsets, fnKey fnKey, 
 	} else {
 		computedReplicas = 0
 	}
-	return int(clamp(computedReplicas, minReplicas, maxReplicas))
+	return clamp(computedReplicas, minReplicas, maxReplicas)
 }
 
 func clamp(value int32, min int32, max int32) int32 {
@@ -443,7 +447,7 @@ func clamp(value int32, min int32, max int32) int32 {
 	return value
 }
 
-func max(a int, b int) int {
+func max(a int32, b int32) int32 {
 	if a > b {
 		return a
 	} else {

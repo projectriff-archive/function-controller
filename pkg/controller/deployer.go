@@ -47,8 +47,8 @@ type Deployer interface {
 	// Undeploy is called when a function is unregistered.
 	Undeploy(function *v1.Function) error
 
-	// Update is called when a function is updated.
-	Update(function *v1.Function) error
+	// Update is called when a function is updated. The desired number of replicas of the function is provided.
+	Update(function *v1.Function, replicas int) error
 
 	// Scale is used to vary the number of replicas dedicated to a function, including going to zero.
 	Scale(function *v1.Function, replicas int) error
@@ -128,11 +128,12 @@ func (d *deployer) Undeploy(function *v1.Function) error {
 		&metav1.DeleteOptions{PropagationPolicy: &propagation})
 }
 
-func (d *deployer) Update(function *v1.Function) error {
+func (d *deployer) Update(function *v1.Function, replicas int) error {
+	r := int32(replicas)
 	deployment := v1beta1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{Name: function.Name, Namespace: function.Namespace},
 		Spec: v1beta1.DeploymentSpec{
-			Replicas: &zero,
+			Replicas: &r,
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Name: function.Name, Labels: map[string]string{"function": function.Name}},
 				Spec:       d.buildPodSpec(function),
